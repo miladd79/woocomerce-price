@@ -1,0 +1,557 @@
+<?php
+// 1. شورت‌کد برای نمایش درصد تخفیف
+function display_discount_percentage() {
+    return '<span class="discount-percentage-container"></span>';
+}
+add_shortcode( 'discount_percentage', 'display_discount_percentage' );
+
+// 2. شورت‌کد برای نمایش قیمت اصلی
+function display_original_price() {
+    return '<span class="original-price-container"></span>';
+}
+add_shortcode( 'original_price', 'display_original_price' );
+
+// 3. enqueue اسکریپت‌های AJAX (برای محصولات متغیر)
+add_action( 'wp_enqueue_scripts', 'enqueue_custom_ajax_script' );
+function enqueue_custom_ajax_script() {
+    if ( is_product() ) {
+        wp_enqueue_script( 'custom-ajax-script', get_template_directory_uri() . '/js/custom-ajax.js', array('jquery'), null, true );
+        wp_localize_script( 'custom-ajax-script', 'ajax_object', array( 'ajax_url' => admin_url( 'admin-ajax.php' ) ) );
+    }
+}
+
+// 4. تابع AJAX برای دریافت قیمت و تخفیف واریاسیون (برای محصولات متغیر)
+add_action( 'wp_ajax_get_variable_price', 'get_variable_price' );
+add_action( 'wp_ajax_nopriv_get_variable_price', 'get_variable_price' );
+function get_variable_price() {
+    $variation_id = intval( $_POST['variation_id'] );
+    $variation = wc_get_product( $variation_id );
+
+    if ( $variation ) {
+        $regular_price = floatval( $variation->get_regular_price() );
+        $sale_price = floatval( $variation->get_sale_price() );
+        $stock_quantity = $variation->get_stock_quantity();
+
+        // محاسبه حداکثر تعداد خرید بر اساس موجودی
+        if ( $variation->managing_stock() && $stock_quantity !== null ) {
+            $max_purchase = min( 3, $stock_quantity );
+        } else {
+            $max_purchase = 3;
+        }
+
+        if ( $sale_price && $sale_price > 0 && $sale_price < $regular_price ) {
+            $percentage = round( ( ( $regular_price - $sale_price ) / $regular_price ) * 100 );
+            wp_send_json( array(
+                'original_price' => '<span class="original-price">' . wc_price( $regular_price ) . '</span>',
+                'discount_percentage' => '<span class="discount-percentage">' . $percentage . '% </span>',
+                'has_discount' => true,
+                'display_price' => $sale_price,
+                'max_qty' => $max_purchase // اضافه کردن حداکثر تعداد خرید
+            ) );
+        } else {
+            // اگر تخفیفی وجود نداشت
+            wp_send_json( array(
+                'original_price' => '',
+                'discount_percentage' => '',
+                'has_discount' => false,
+                'display_price' => $regular_price,
+                'max_qty' => $max_purchase // اضافه کردن حداکثر تعداد خرید
+            ) );
+        }
+    }
+}
+
+// 5. شورت‌کد برای نمایش فرم انتخاب واریاسیون بدون دکمه اصلی
+function custom_product_variations_shortcode() {
+    global $product;
+    if ( ! $product ) {
+        return '';
+    }
+    ob_start();
+    if ( $product->is_type( 'variable' ) ) {
+        // کد برای محصولات متغیر
+        $attributes = $product->get_variation_attributes();
+        $available_variations = $product->get_available_variations();
+        ?>
+        <form class="variations_form cart" method="post" enctype='multipart/form-data' data-product_id="<?php echo absint( $product->get_id() ); ?>" data-product_variations="<?php echo htmlspecialchars( wp_json_encode( $available_variations ) ); ?>">
+            <?php do_action( 'woocommerce_before_variations_form' ); ?>
+            <?php if ( empty( $available_variations ) && false !== $available_variations ) : ?>
+                <p class="stock out-of-stock"><?php esc_html_e( 'این محصول در حال حاضر موجود نیست.', 'woocommerce' ); ?></p>
+            <?php else : ?>
+                <table class="variations" cellspacing="0">
+                    <tbody>
+                        <?php foreach ( $attributes as $attribute_name => $options ) : ?>
+                            <tr>
+                                <td class="label"><label for="<?php echo esc_attr( sanitize_title( $attribute_name ) ); ?>"><?php echo wc_attribute_label( $attribute_name ); ?></label></td>
+                                <td class="value">
+                                    <?php
+                                        wc_dropdown_variation_attribute_options( array(
+                                            'options'   => $options,
+                                            'attribute' => $attribute_name,
+                                            'product'   => $product,
+                                            'selected'  => isset($_REQUEST[ 'attribute_' . sanitize_title( $attribute_name ) ]) ? wc_clean( $_REQUEST[ 'attribute_' . sanitize_title( $attribute_name ) ] ) : ''
+                                        ) );
+                                    ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+            <?php
+            $sold_individually = $product->is_sold_individually();
+            if ( ! $sold_individually ) :
+                // تنظیم حداکثر تعداد خرید به ۳ یا موجودی محصول
+                if ( $product->managing_stock() && $product->get_stock_quantity() !== null ) {
+                    $max_purchase_quantity = min( 3, $product->get_stock_quantity() );
+                } else {
+                    $max_purchase_quantity = 3;
+                }
+                woocommerce_quantity_input( array(
+                    'input_id'     => 'quantity_' . $product->get_id(),
+                    'input_value'  => 1,
+                    'product_name' => $product->get_name(),
+                    'min_value'    => 1,
+                    'max_value'    => $max_purchase_quantity,
+                ) );
+            endif;
+            ?>
+            <!-- حذف دکمه افزودن به سبد خرید اصلی -->
+            <!-- <button type="submit" class="single_add_to_cart_button button alt wc-variation-selection-needed">افزودن به سبد خرید</button> -->
+            <input type="hidden" name="add-to-cart" value="<?php echo absint( $product->get_id() ); ?>">
+            <input type="hidden" name="product_id" value="<?php echo absint( $product->get_id() ); ?>">
+            <input type="hidden" name="variation_id" class="variation_id" value="">
+            <?php do_action( 'woocommerce_after_variations_form' ); ?>
+        </form>
+        <?php
+    } else {
+        // کد برای محصولات ساده
+        ?>
+        <form class="cart" method="post" enctype='multipart/form-data'>
+            <?php
+            $sold_individually = $product->is_sold_individually();
+            if ( ! $sold_individually ) :
+                // تنظیم حداکثر تعداد خرید به ۳ یا موجودی محصول
+                if ( $product->managing_stock() && $product->get_stock_quantity() !== null ) {
+                    $max_purchase_quantity = min( 3, $product->get_stock_quantity() );
+                } else {
+                    $max_purchase_quantity = 3;
+                }
+                woocommerce_quantity_input( array(
+                    'input_id'     => 'quantity_' . $product->get_id(),
+                    'input_value'  => 1,
+                    'product_name' => $product->get_name(),
+                    'min_value'    => 1,
+                    'max_value'    => $max_purchase_quantity,
+                ) );
+            endif;
+            ?>
+            <!-- حذف دکمه افزودن به سبد خرید اصلی برای محصولات ساده نیز -->
+            <!-- <button type="submit" name="add-to-cart" value="<?php echo absint( $product->get_id() ); ?>" class="single_add_to_cart_button button alt">
+                افزودن به سبد خرید
+            </button> -->
+            <input type="hidden" name="add-to-cart" value="<?php echo absint( $product->get_id() ); ?>">
+        </form>
+        <?php
+    }
+    return ob_get_clean();
+}
+add_shortcode( 'custom_product_variations', 'custom_product_variations_shortcode' );
+
+// 6. شورت‌کد برای دکمه افزودن به سبد خرید کپی (بدون AJAX)
+function custom_add_to_cart_button_copy_shortcode() {
+    global $product;
+    if ( ! $product ) {
+        return '';
+    }
+    // تنظیم حداکثر تعداد خرید به ۳ یا موجودی محصول
+    if ( $product->managing_stock() && $product->get_stock_quantity() !== null ) {
+        $max_qty = min( 3, $product->get_stock_quantity() );
+    } else {
+        $max_qty = 3;
+    }
+    $sold_individually = $product->is_sold_individually();
+    ob_start();
+    ?>
+    <form class="custom-add-to-cart-copy-form" method="post" enctype='multipart/form-data'>
+        <?php if ( ! $sold_individually ) :
+            woocommerce_quantity_input( array(
+                'input_id'     => 'quantity_copy_' . $product->get_id(),
+                'input_value'  => 1,
+                'product_name' => $product->get_name(),
+                'min_value'    => 1,
+                'max_value'    => $max_qty,
+            ) );
+        endif; ?>
+        <?php if ( $product->is_type( 'variable' ) ) : ?>
+            <input type="hidden" name="variation_id" class="variation_id" value="">
+            <!-- Hidden variation attributes will be appended via JavaScript -->
+        <?php endif; ?>
+        <input type="hidden" name="add-to-cart" value="<?php echo absint( $product->get_id() ); ?>">
+        <button type="submit" class="single_add_to_cart_button_copy button alt">افزودن به سبد خرید</button>
+    </form>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode( 'custom_add_to_cart_button_copy', 'custom_add_to_cart_button_copy_shortcode' );
+
+// 7. شورت‌کد برای نمایش قیمت محصول با در نظر گرفتن تخفیف برای محصولات ساده و متغیر
+function custom_product_price_shortcode() {
+    global $product;
+    if ( ! $product || ! $product->is_in_stock() ) {
+        return '';
+    }
+
+    ob_start();
+    // بررسی اینکه آیا محصول ساده یا متغیر است و اینکه آیا تخفیف دارد
+    if ( $product->is_type( 'simple' ) ) {
+        $regular_price = floatval( $product->get_regular_price() );
+        $sale_price = floatval( $product->get_sale_price() );
+
+        if ( $sale_price && $sale_price > 0 && $sale_price < $regular_price ) {
+            // اگر محصول تخفیف داشت، قیمت تخفیف خورده را نمایش بده
+            ?>
+            <div class="custom-product-price">
+                <span class="price">
+                    <span class="price-amount">
+                        <?php echo number_format( $sale_price, 0, '.', ',' ); ?>
+                    </span>
+                    <span class="price-currency"> تومان</span>
+                </span>
+            </div>
+            <?php
+        } else {
+            // اگر محصول تخفیف نداشت، قیمت اصلی را نمایش بده
+            ?>
+            <div class="custom-product-price">
+                <span class="price">
+                    <span class="price-amount">
+                        <?php echo number_format( $regular_price, 0, '.', ',' ); ?>
+                    </span>
+                    <span class="price-currency"> تومان</span>
+                </span>
+            </div>
+            <?php
+        }
+    } elseif ( $product->is_type( 'variable' ) ) {
+        // برای محصولات متغیر، نمایش قیمت واریاسیون پیش‌فرض (اگر وجود داشته باشد)
+        $default_attributes = $product->get_default_attributes();
+        $available_variations = $product->get_available_variations();
+
+        $variation_id = 0;
+
+        foreach ( $available_variations as $variation_data ) {
+            $match = true;
+            foreach ( $default_attributes as $key => $value ) {
+                $attribute_key = 'attribute_' . sanitize_title( $key );
+                if ( isset( $variation_data['attributes'][ $attribute_key ] ) ) {
+                    if ( $variation_data['attributes'][ $attribute_key ] != $value ) {
+                        $match = false;
+                        break;
+                    }
+                } else {
+                    $match = false;
+                    break;
+                }
+            }
+            if ( $match ) {
+                $variation_id = $variation_data['variation_id'];
+                break;
+            }
+        }
+
+        if ( $variation_id ) {
+            $variation = wc_get_product( $variation_id );
+            $regular_price = floatval( $variation->get_regular_price() );
+            $sale_price = floatval( $variation->get_sale_price() );
+
+            if ( $sale_price && $sale_price > 0 && $sale_price < $regular_price ) {
+                // اگر محصول تخفیف داشت، قیمت تخفیف خورده را نمایش بده
+                ?>
+                <div class="custom-product-price">
+                    <span class="price">
+                        <span class="price-amount">
+                            <?php echo number_format( $sale_price, 0, '.', ',' ); ?>
+                        </span>
+                        <span class="price-currency"> تومان</span>
+                    </span>
+                </div>
+                <?php
+            } else {
+                // اگر محصول تخفیف نداشت، قیمت اصلی را نمایش بده
+                ?>
+                <div class="custom-product-price">
+                    <span class="price">
+                        <span class="price-amount">
+                            <?php echo number_format( $regular_price, 0, '.', ',' ); ?>
+                        </span>
+                        <span class="price-currency"> تومان</span>
+                    </span>
+                </div>
+                <?php
+            }
+        } else {
+            // اگر واریاسیون پیش‌فرض وجود نداشت، بازه قیمت را نمایش بده
+            $min_price = $product->get_variation_price( 'min', true );
+            $max_price = $product->get_variation_price( 'max', true );
+            ?>
+            <div class="custom-product-price">
+                <span class="price">
+                    <span class="price-amount">
+                        <?php
+                        if ( $min_price == $max_price ) {
+                            echo number_format( $min_price, 0, '.', ',' );
+                        } else {
+                            echo number_format( $min_price, 0, '.', ',' ) . ' - ' . number_format( $max_price, 0, '.', ',' );
+                        }
+                        ?>
+                    </span>
+                    <span class="price-currency"> تومان</span>
+                </span>
+            </div>
+            <?php
+        }
+    }
+
+    return ob_get_clean();
+}
+add_shortcode( 'custom_product_price', 'custom_product_price_shortcode' );
+
+// 8. افزودن اسکریپت‌های جاوااسکریپت برای هماهنگ‌سازی واریاسیون‌ها و قیمت‌ها
+function custom_add_to_cart_sync_scripts() {
+    if ( is_product() ) {
+        global $product;
+        $product_id = absint( $product->get_id() );
+
+        // تنظیم حداکثر تعداد خرید به ۳ یا موجودی محصول
+        if ( $product->managing_stock() && $product->get_stock_quantity() !== null ) {
+            $max_qty = min( 3, $product->get_stock_quantity() );
+        } else {
+            $max_qty = 3;
+        }
+
+        $sold_individually = $product->is_sold_individually() ? 'true' : 'false';
+
+        // دریافت قیمت اصلی محصول برای استفاده در بازنشانی
+        $original_price_html = $product->get_price_html();
+
+        // برای محصولات ساده، بررسی تخفیف
+        if ( $product->is_type( 'simple' ) ) {
+            $regular_price = floatval( $product->get_regular_price() );
+            $sale_price    = floatval( $product->get_sale_price() );
+            $has_discount = false;
+            if ( $sale_price && $sale_price > 0 && $sale_price < $regular_price ) {
+                $percentage = round( ( ( $regular_price - $sale_price ) / $regular_price ) * 100 );
+                $has_discount = true;
+                $unit_price = $sale_price; // قیمت تخفیف خورده
+
+                // تنظیم حداکثر تعداد خرید برای محصول ساده
+                if ( $product->managing_stock() && $product->get_stock_quantity() !== null ) {
+                    $max_qty = min( 3, $product->get_stock_quantity() );
+                } else {
+                    $max_qty = 3;
+                }
+            } else {
+                $unit_price = $regular_price; // قیمت اصلی
+
+                // تنظیم حداکثر تعداد خرید برای محصول ساده بدون تخفیف
+                if ( $product->managing_stock() && $product->get_stock_quantity() !== null ) {
+                    $max_qty = min( 3, $product->get_stock_quantity() );
+                } else {
+                    $max_qty = 3;
+                }
+            }
+        } else {
+            $unit_price = floatval( $product->get_price() );
+        }
+
+        ?>
+        <script type="text/javascript">
+            jQuery(document).ready(function($){
+                var productID = <?php echo json_encode( $product_id ); ?>;
+                var maxQty = <?php echo json_encode( $max_qty ); ?>; // تنظیم حداکثر تعداد خرید به صورت داینامیک
+                var unitPrice = <?php echo json_encode( $unit_price ); ?>;
+                var isVariable = <?php echo json_encode( $product->is_type( 'variable' ) ? 'true' : 'false' ); ?>;
+                var soldIndividually = <?php echo $sold_individually; ?>;
+                var selectedVariationPrice = null;
+                var selectedMaxQty = maxQty;  // مقدار موجودی متغیر انتخاب‌شده
+
+                // تابع برای فرمت‌بندی قیمت
+                function wc_price(price) {
+                    var formattedPrice = new Intl.NumberFormat('fa-IR', {
+                        style: 'decimal'
+                    }).format(price);
+
+                    return formattedPrice;
+                }
+
+                // تابع برای به‌روزرسانی قیمت کلی
+                function updateTotalPrice(quantity) {
+                    if (soldIndividually === 'true') {
+                        quantity = 1;
+                    } else {
+                        quantity = parseInt(quantity);
+                        if (isNaN(quantity) || quantity < 1) {
+                            quantity = 1;
+                        }
+                        quantity = Math.min(quantity, selectedMaxQty); // استفاده از حداکثر تعداد خرید داینامیک
+                    }
+
+                    // همگام‌سازی مقدار هر دو فیلد
+                    $('#quantity_' + productID + ', #quantity_copy_' + productID).val(quantity);
+
+                    var total = 0;
+                    if (selectedVariationPrice !== null) {
+                        total = selectedVariationPrice * quantity;
+                    } else if (unitPrice > 0) {
+                        total = unitPrice * quantity;
+                    } else {
+                        total = 0;
+                    }
+
+                    if (total > 0) {
+                        $('.custom-product-price .price-amount').text(wc_price(total));
+                    } else {
+                        $('.custom-product-price .price-amount').text('');
+                    }
+                }
+
+                // همگام‌سازی تعداد با فرم کپی
+                if ( soldIndividually !== 'true' ) {
+                    // همگام‌سازی فیلد تعداد اصلی و کپی
+                    var quantitySelector = '#quantity_' + productID + ', #quantity_copy_' + productID;
+                    $(quantitySelector).on('input change', function(){
+                        var quantity = $(this).val();
+                        updateTotalPrice(quantity);
+                    });
+                }
+
+                if ( isVariable === 'true' ) {
+                    // برای محصولات متغیر
+                    $('.variations_form').on('found_variation', function(event, variation){
+                        selectedVariationPrice = parseFloat(variation.display_price);
+                        selectedMaxQty = variation.max_qty || 3; // تنظیم حداکثر تعداد خرید داینامیک
+                        updateTotalPrice($('#quantity_' + productID).val() || 1);
+
+                        // تنظیم variation_id در فرم اصلی
+                        $(this).find('.variation_id').val(variation.variation_id);
+
+                        // تنظیم variation_id در فرم کپی
+                        $('.custom-add-to-cart-copy-form .variation_id').val(variation.variation_id);
+
+                        // تنظیم سایر فیلدهای واریاسیون در فرم کپی
+                        $('.custom-add-to-cart-copy-form').find('input[name^="attribute_"]').remove(); // حذف فیلدهای موجود
+                        $.each(variation.attributes, function(key, value) {
+                            $('.custom-add-to-cart-copy-form').append('<input type="hidden" name="' + key + '" value="' + value + '">');
+                        });
+
+                        // به‌روزرسانی قیمت محصول
+                        if(variation.display_price) {
+                            var formattedPrice = wc_price(variation.display_price * ($('#quantity_' + productID).val() || 1));
+                            $('.custom-product-price .price-amount').text(formattedPrice);
+                        }
+
+                        // درخواست AJAX برای به‌روزرسانی تخفیف و حداکثر تعداد خرید
+                        $.ajax({
+                            url: ajax_object.ajax_url,
+                            type: 'POST',
+                            data: {
+                                action: 'get_variable_price',
+                                variation_id: variation.variation_id
+                            },
+                            success: function(data) {
+                                // به‌روزرسانی قیمت اصلی
+                                $('.original-price-container').html(data.original_price);
+
+                                // به‌روزرسانی درصد تخفیف
+                                $('.discount-percentage-container').html(data.discount_percentage);
+
+                                // به‌روزرسانی حداکثر تعداد خرید
+                                if (typeof data.max_qty !== 'undefined') {
+                                    selectedMaxQty = data.max_qty;
+                                    // به‌روزرانی فیلد تعداد در فرم‌ها
+                                    $('#quantity_' + productID + ', #quantity_copy_' + productID).attr('max', selectedMaxQty);
+                                }
+
+                                if ( data.has_discount === true ) {
+                                    // نمایش عناصر تخفیف
+                                    $('.discount-section').show();
+                                } else {
+                                    // مخفی کردن عناصر تخفیف
+                                    $('.discount-section').hide();
+                                }
+                            }
+                        });
+                    });
+
+                    // در هنگام بازنشانی واریاسیون
+                    $('.variations_form').on('reset_data', function(){
+                        selectedVariationPrice = null;
+                        selectedMaxQty = maxQty; // بازنشانی به حداکثر تعداد خرید داینامیک
+                        updateTotalPrice($('#quantity_' + productID).val() || 1);
+
+                        // بازنشانی variation_id در فرم اصلی
+                        $(this).find('.variation_id').val('');
+
+                        // بازنشانی variation_id در فرم کپی
+                        $('.custom-add-to-cart-copy-form .variation_id').val('');
+
+                        // بازنشانی سایر فیلدهای واریاسیون در فرم کپی
+                        $('.custom-add-to-cart-copy-form').find('input[name^="attribute_"]').remove();
+
+                        // مخفی کردن عناصر تخفیف
+                        $('.discount-section').hide();
+
+                        // پاک کردن قیمت‌ها
+                        $('.original-price-container').html('');
+                        $('.discount-percentage-container').html('');
+
+                        // بازنشانی قیمت محصول
+                        $('.custom-product-price .price-amount').text('');
+                    });
+
+                    // به‌روزرسانی قیمت در بارگذاری اولیه صفحه
+                    setTimeout(function(){
+                        var variationsForm = $('.variations_form');
+                        variationsForm.trigger('check_variations');
+                    }, 100); // تاخیر 100 میلی‌ثانیه برای اطمینان از اینکه فرم واریاسیون‌ها بارگذاری شده است
+
+                } else {
+                    // برای محصولات ساده
+
+                    // بررسی تخفیف برای محصول ساده
+                    <?php if ( isset( $has_discount ) && $has_discount ) : ?>
+                        var hasDiscount = true;
+                        var originalPriceHtml = '<?php echo '<span class="original-price">' . wc_price( $regular_price ) . '</span>'; ?>';
+                        var discountPercentageHtml = '<?php echo '<span class="discount-percentage">' . $percentage . '% </span>'; ?>';
+                    <?php else : ?>
+                        var hasDiscount = false;
+                        var originalPriceHtml = '';
+                        var discountPercentageHtml = '';
+                    <?php endif; ?>
+
+                    if ( hasDiscount ) {
+                        $('.original-price-container').html(originalPriceHtml);
+                        $('.discount-percentage-container').html(discountPercentageHtml);
+                        $('.discount-section').show();
+                    } else {
+                        $('.original-price-container').html('');
+                        $('.discount-percentage-container').html('');
+                        $('.discount-section').hide();
+                    }
+
+                    // به‌روزرسانی قیمت تنها در صورت تغییر تعداد
+                    if ( soldIndividually !== 'true' ) {
+                        var quantitySelector = '#quantity_' + productID + ', #quantity_copy_' + productID;
+                        $(quantitySelector).on('input change', function(){
+                            var quantity = $(this).val();
+                            updateTotalPrice(quantity);
+                        });
+                    }
+                }
+            });
+        </script>
+        <?php
+    }
+}
+add_action( 'wp_footer', 'custom_add_to_cart_sync_scripts' );
